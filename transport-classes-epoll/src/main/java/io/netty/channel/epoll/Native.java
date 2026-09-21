@@ -328,8 +328,12 @@ public final class Native {
             throw new IllegalStateException("Only supported on Linux");
         }
         String staticLibName = "netty_transport_native_epoll";
-        String sharedLibName = staticLibName + '_' + PlatformDependent.normalizedArch();
         ClassLoader cl = PlatformDependent.getClassLoader(Native.class);
+        if (PlatformDependent.isAndroid()) {
+            NativeLibraryLoader.load(staticLibName, cl);
+            return;
+        }
+        String sharedLibName = staticLibName + '_' + PlatformDependent.normalizedArch();
         try {
             NativeLibraryLoader.load(sharedLibName, cl);
         } catch (UnsatisfiedLinkError e1) {

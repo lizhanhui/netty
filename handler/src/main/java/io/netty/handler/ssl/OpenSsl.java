@@ -750,9 +750,10 @@ public final class OpenSsl {
         Set<String> libNames = new LinkedHashSet<String>(5);
         String staticLibName = "netty_tcnative";
 
-        // First, try loading the platform-specific library. Platform-specific
-        // libraries will be available if using a tcnative uber jar.
-        if ("linux".equals(os)) {
+        // Android JNI is loaded from jni/<abi>/libnetty_tcnative.so (no os/arch suffix).
+        if (PlatformDependent.isAndroid()) {
+            libNames.add(staticLibName);
+        } else if ("linux".equals(os)) {
             Set<String> classifiers = PlatformDependent.normalizedLinuxClassifiers();
             for (String classifier : classifiers) {
                 libNames.add(staticLibName + "_" + os + '_' + arch + "_" + classifier);
@@ -767,8 +768,10 @@ public final class OpenSsl {
         } else {
             libNames.add(staticLibName + "_" + os + '_' + arch);
         }
-        libNames.add(staticLibName + "_" + arch);
-        libNames.add(staticLibName);
+        if (!PlatformDependent.isAndroid()) {
+            libNames.add(staticLibName + "_" + arch);
+            libNames.add(staticLibName);
+        }
 
         NativeLibraryLoader.loadFirstAvailable(PlatformDependent.getClassLoader(SSLContext.class),
             libNames.toArray(EmptyArrays.EMPTY_STRINGS));
