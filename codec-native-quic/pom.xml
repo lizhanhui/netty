@@ -1374,6 +1374,19 @@
         <groupId>com.simpligility.maven.plugins</groupId>
         <artifactId>android-maven-plugin</artifactId>
         <extensions>true</extensions>
+        <!-- Plugin 4.6.0 still uses JAXB. That package left the JDK in 11; keep it on the plugin classpath. -->
+        <dependencies>
+          <dependency>
+            <groupId>javax.xml.bind</groupId>
+            <artifactId>jaxb-api</artifactId>
+            <version>2.3.1</version>
+          </dependency>
+          <dependency>
+            <groupId>org.glassfish.jaxb</groupId>
+            <artifactId>jaxb-runtime</artifactId>
+            <version>2.3.1</version>
+          </dependency>
+        </dependencies>
         <configuration>
           <sdk>
             <platform>${androidMinSdkVersion}</platform>
