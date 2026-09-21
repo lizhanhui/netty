@@ -324,14 +324,17 @@
         <libquiche>libquiche.a</libquiche>
 
         <!-- https://developer.android.com/ndk/guides/other_build_systems -->
-        <jniLibName>netty_quiche</jniLibName>
+        <!-- Matches Quiche.loadNativeLibrary() / LIBRARYNAME: Android loads netty_quiche42, not netty_quiche. -->
+        <jniLibName>netty_quiche42</jniLibName>
         <jni.classifier>${platform}</jni.classifier>
         <javaModuleNameClassifier>android</javaModuleNameClassifier>
         <cflags>-std=c99 -Werror -fno-omit-frame-pointer -fvisibility=hidden -Wunused -Wno-unused-value -O3 -I${quicheHomeIncludeDir} -I${boringsslHomeIncludeDir}</cflags>
         <ldflags>-L${quicheHomeBuildDir} -lquiche -L${boringsslHomeBuildDir} -lssl -lcrypto</ldflags>
         <bundleNativeCode>META-INF/native/${jniLibName}.dll;osname=android;processor=${androidAbi}</bundleNativeCode>
+        <!-- CLI -DANDROID_NDK_HOME wins over this; otherwise take the environment so `export` works. -->
+        <ANDROID_NDK_HOME>${env.ANDROID_NDK_HOME}</ANDROID_NDK_HOME>
         <ndkToolchain>${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64</ndkToolchain>
-        <extraLdflags>-Wl,-soname=${jniLibName}.so -Wl,--build-id=sha1 -Wl,--strip-debug -Wl,--exclude-libs,ALL -lm</extraLdflags>
+        <extraLdflags>-Wl,-soname=lib${jniLibName}.so -Wl,--build-id=sha1 -Wl,--strip-debug -Wl,--exclude-libs,ALL -lm -lc++_shared</extraLdflags>
 
         <extraConfigureArg>--host=${androidTriple}</extraConfigureArg>
 
@@ -769,8 +772,10 @@
                         <!-- https://boringssl.googlesource.com/boringssl/+/HEAD/BUILDING.md#building-for-android -->
                         <exec executable="cmake" failonerror="true" dir="${boringsslBuildDir}" resolveexecutable="true">
                           <arg value="-DANDROID_ABI=${androidAbi}" />
+                          <arg value="-DANDROID_PLATFORM=android-${androidMinSdkVersion}" />
+                          <arg value="-DANDROID_STL=c++_shared" />
                           <arg value="-DCMAKE_TOOLCHAIN_FILE=${ANDROID_NDK_HOME}/build/cmake/android.toolchain.cmake" />
-                          <arg value="-DANDROID_NATIVE_API_LEVEL=${androidNdkVersion}" />
+                          <arg value="-DANDROID_NATIVE_API_LEVEL=${androidMinSdkVersion}" />
                           <arg value="-DCMAKE_POSITION_INDEPENDENT_CODE=TRUE" />
                           <arg value="-DCMAKE_BUILD_TYPE=Release" />
                           <arg value="-DCMAKE_ASM_FLAGS=${cmakeAsmFlags}" />
