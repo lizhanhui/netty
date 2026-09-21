@@ -665,6 +665,23 @@
                   <target>
                     <mkdir dir="${project.build.directory}/native-libs/${androidAbi}" />
                     <copy file="${project.build.outputDirectory}/META-INF/native/libnetty_transport_native_epoll.so" todir="${project.build.directory}/native-libs/${androidAbi}" failonerror="true" />
+
+                    <!-- Fat AAR: jni/<abi>/ from every ABI already in native-libs/. Build both
+                         ABIs without cleaning native-libs so this zip contains arm64-v8a and
+                         armeabi-v7a, matching codec-native-quic. -->
+                    <delete dir="${project.build.directory}/android-aar" quiet="true" />
+                    <mkdir dir="${project.build.directory}/android-aar/jni" />
+                    <copy todir="${project.build.directory}/android-aar/jni">
+                      <fileset dir="${project.build.directory}/native-libs" includes="**/*.so" />
+                    </copy>
+                    <filter token="JAVA_MODULE_NAME" value="${fallbackModuleName}" />
+                    <filter token="MIN_SDK_VERSION" value="${androidMinSdkVersion}" />
+                    <copy file="src/main/AndroidManifest.xml" tofile="${project.build.directory}/android-aar/AndroidManifest.xml" filtering="true" />
+                    <jar destfile="${project.build.directory}/android-aar/classes.jar" basedir="${project.build.outputDirectory}" excludes="META-INF/native/**,**/*.c,**/*.h" />
+                    <zip destfile="${project.build.directory}/${project.build.finalName}-android.aar">
+                      <fileset dir="${project.build.directory}/android-aar" />
+                    </zip>
+                    <attachartifact file="${project.build.directory}/${project.build.finalName}-android.aar" classifier="android" type="aar" />
                   </target>
                 </configuration>
               </execution>

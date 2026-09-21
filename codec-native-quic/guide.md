@@ -13,6 +13,7 @@ produce an unloadable library even if CMake and Cargo succeed.
 - ELF machine type matches the ABI
 - `DT_NEEDED` is only bionic (`libc`, `libm`, `libdl`, `liblog`) plus `libc++_shared`
 - Java `System.loadLibrary("netty_quiche42")` can find that soname
+- One AAR per component ships both ABIs under `jni/<abi>/` (QUIC, epoll, tcnative)
 
 Host **must** be Linux x86_64. The Android profile hardcodes
 
@@ -441,12 +442,16 @@ Do not link `-lrt`. bionic has `clock_gettime` in `libc`; there is no
 `librt.so`. unix-common's Makefile ignores `LDFLAGS` anyway; epoll's hawtjni
 `LIBS` must drop `-lrt`.
 
-Classifier is `android-${androidAbi}` so these JARs never collide with glibc
-`linux-aarch_64`.
+Per-ABI JARs use classifier `android-${androidAbi}` so they never collide with
+glibc `linux-aarch_64`. Those JARs are build intermediates. The Android app
+dependency is the fat AAR (section 10.4): classifier `android`, type `aar`,
+`jni/arm64-v8a` + `jni/armeabi-v7a`.
 
 ### 10.2 Maven (one ABI at a time)
 
 Default `-Dandroid` is `armeabi-v7a` (auto-activated), same layout as QUIC.
+**Do not `clean` between ABIs** — `target/native-libs/<abi>/` must accumulate
+so the last `package` can zip both into one AAR.
 
 ```bash
 export ANDROID_NDK_HOME=/data/soft/ndk/android-ndk-r25c
@@ -458,7 +463,7 @@ export JAVA_HOME=/root/.sdkman/candidates/java/current   # JDK 11
   -Dandroid -Pandroid-arm64-v8a \
   -DANDROID_NDK_HOME="$ANDROID_NDK_HOME"
 
-# armeabi-v7a
+# armeabi-v7a (rebuilds this ABI; keeps arm64-v8a in native-libs/; writes fat AAR)
 ./mvnw -pl transport-native-unix-common,transport-native-epoll -am package \
   -DskipTests \
   -Dandroid \
@@ -483,11 +488,39 @@ f="$PWD/transport-native-epoll/target/native-libs/armeabi-v7a/libnetty_transport
 file "$f"
 ```
 
-Ship the `.so` under the APK/AAR `jni/<abi>/` directory. Do not rely on
-`NativeLibraryLoader` extracting `META-INF/native/` to tmpdir; Android tmp is
-often `noexec`.
+### 10.4 Fat AAR (both ABIs, same as QUIC)
 
-### 10.4 Standalone fallback (no Maven)
+`copy-android-native-lib` zips **every** `target/native-libs/<abi>/*.so` into
+`jni/<abi>/` of
+
+`transport-native-epoll/target/netty-transport-native-epoll-*-android.aar`
+
+(classifier `android`, type `aar`). `classes.jar` is the Java classes without
+`META-INF/native/`. Packaging stays `jar`; this AAR is an attached artifact.
+Do not put both ABIs in one `META-INF/native/libnetty_transport_native_epoll.so`
+JAR — that path can hold only one file, and Android tmp extract is often
+`noexec`.
+
+```bash
+aar="$PWD/transport-native-epoll/target/netty-transport-native-epoll-"*"-android.aar"
+unzip -l $aar
+# AndroidManifest.xml
+# classes.jar
+# jni/arm64-v8a/libnetty_transport_native_epoll.so
+# jni/armeabi-v7a/libnetty_transport_native_epoll.so
+```
+
+Gradle (native fragment AAR; keep `netty-transport-classes-epoll` as the Java API):
+
+```
+implementation("io.netty:netty-transport-classes-epoll:${nettyVersion}")
+implementation("io.netty:netty-transport-native-epoll:${nettyVersion}:android@aar")
+```
+
+AGP copies `jni/<abi>/` into the APK. `Native.loadNativeLibrary()` on Android
+calls `System.loadLibrary("netty_transport_native_epoll")` (section 12).
+
+### 10.5 Standalone fallback (no Maven)
 
 ```bash
 NDK=/data/soft/ndk/android-ndk-r25c
@@ -544,11 +577,13 @@ mvn -pl boringssl-static -am package -DskipTests \
   -Dandroid -Pandroid-arm64-v8a \
   -DANDROID_NDK_HOME="$ANDROID_NDK_HOME"
 
-# armeabi-v7a
+# armeabi-v7a (rebuilds this ABI; keeps arm64-v8a in native-libs/; writes fat AAR)
 mvn -pl boringssl-static -am package -DskipTests \
   -Dandroid \
   -DANDROID_NDK_HOME="$ANDROID_NDK_HOME"
 ```
+
+**Do not `clean` between ABIs.** `native-libs/<abi>/` must accumulate.
 
 Green:
 
@@ -559,7 +594,28 @@ readelf -d "$f" | grep NEEDED
 # ELF 64-bit ARM aarch64; DT_NEEDED: libc, libm, libdl, libc++_shared (no librt, no libssl)
 ```
 
-Ship `libnetty_tcnative.so` and `libc++_shared.so` under `jni/<abi>/`.
+The last `package` attaches
+
+`boringssl-static/target/netty-tcnative-boringssl-static-*-android.aar`
+
+(classifier `android`, type `aar`) with both ABIs, same layout as QUIC:
+
+```bash
+aar=boringssl-static/target/netty-tcnative-boringssl-static-*-android.aar
+unzip -l $aar
+# jni/arm64-v8a/{libnetty_tcnative.so,libc++_shared.so}
+# jni/armeabi-v7a/{libnetty_tcnative.so,libc++_shared.so}
+```
+
+Gradle (native fragment AAR; keep `netty-tcnative-classes` as the Java API):
+
+```
+implementation("io.netty:netty-tcnative-classes:${tcnativeVersion}")
+implementation("io.netty:netty-tcnative-boringssl-static:${tcnativeVersion}:android@aar")
+```
+
+Per-ABI classified JARs remain intermediates. Do not ship a fat
+`META-INF/native/` JAR.
 
 ### 11.2 What the profiles do
 
@@ -571,7 +627,8 @@ Ship `libnetty_tcnative.so` and `libc++_shared.so` under `jni/<abi>/`.
    for v7a, host-built `tools/gen_test_char`).
 3. tcnative JNI (`hawtjni`) `--with-ssl=no --with-apr=... --with-static-libs`,
    NDK clang, `LDFLAGS=-lssl -lcrypto -lc++_shared`.
-4. Copy `jni/<abi>/libnetty_tcnative.so` plus `libc++_shared.so`.
+4. Copy `native-libs/<abi>/libnetty_tcnative.so` plus `libc++_shared.so`, then
+   zip every ABI under that tree into the fat AAR `jni/<abi>/`.
 
 Leave tcnative's `boringsslCommitSha` alone unless you intend to re-validate.
 
