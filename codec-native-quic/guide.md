@@ -1,5 +1,8 @@
 # Android ARM build guide (`arm64-v8a`, `armeabi-v7a`)
 
+QUIC is sections 0–9. Native epoll / unix-common is section 10.
+`netty-tcnative` (separate GitHub repo) is section 11. Loaders are section 12.
+
 This is the runbook for a green native QUIC build on Android ARM. The pipeline is
 already in `pom.xml`; it is not run in Netty 4.2 CI, and three pom bugs will
 produce an unloadable library even if CMake and Cargo succeed.
@@ -398,3 +401,233 @@ Treat an unpinned `cargo install cargo-ndk` as the first suspect.
 6. Confirm `libnetty_quiche42.so` is ELF32 / ARM.
 7. Copy `libc++_shared.so` into both `native-libs/<abi>/` dirs.
 8. Re-package if you need the AAR; skip the four-ABI iterator until ARM is green.
+
+---
+
+## 10. Native transport (`unix-common` + `epoll`)
+
+Official `linux-aarch64` / `linux-x86_64` natives are **glibc**. Android is
+**bionic**. `aarch64-none-linux-gnu-gcc` artifacts will not `dlopen` on a
+device. The wiki says the same thing for musl: if the libc is not glibc, you
+must rebuild.
+
+| module | this repo? | Android ARM? |
+|---|---|---|
+| `transport-native-unix-common` | yes | yes — static `.a`, NDK clang |
+| `transport-native-epoll` | yes | yes — JNI `.so`, NDK clang + hawtjni |
+| `transport-native-io_uring` | yes | no — not a public Android API |
+| `transport-native-kqueue` | yes | no — BSD/macOS only |
+
+`Native.loadNativeLibrary()` already accepts `normalizedOs() == "linux"`
+(Android reports `os.name=Linux`). The `.so` must still be **bionic**, named
+`libnetty_transport_native_epoll.so` (no os/arch suffix; section 12).
+
+Do **not** pass `-Plinux-aarch64`. That profile is GNU/glibc.
+
+### 10.1 ABI / NDK mapping (same as QUIC)
+
+| Android ABI | clang wrapper (API 21) |
+|---|---|
+| `arm64-v8a` | `aarch64-linux-android21-clang` |
+| `armeabi-v7a` | `armv7a-linux-androideabi21-clang` |
+
+Archiver is `llvm-ar`, not `${triple}-ar`.
+
+Host **must** be Linux x86_64. `JAVA_HOME` must be JDK 11 so
+`$JAVA_HOME/include/linux/jni_md.h` is on the compile line (`_LP64`-aware, so
+the same header is valid for both ABIs).
+
+Do not link `-lrt`. bionic has `clock_gettime` in `libc`; there is no
+`librt.so`. unix-common's Makefile ignores `LDFLAGS` anyway; epoll's hawtjni
+`LIBS` must drop `-lrt`.
+
+Classifier is `android-${androidAbi}` so these JARs never collide with glibc
+`linux-aarch_64`.
+
+### 10.2 Maven (one ABI at a time)
+
+Default `-Dandroid` is `armeabi-v7a` (auto-activated), same layout as QUIC.
+
+```bash
+export ANDROID_NDK_HOME=/data/soft/ndk/android-ndk-r25c
+export JAVA_HOME=/root/.sdkman/candidates/java/current   # JDK 11
+
+# arm64-v8a
+./mvnw -pl transport-native-unix-common,transport-native-epoll -am package \
+  -DskipTests \
+  -Dandroid -Pandroid-arm64-v8a \
+  -DANDROID_NDK_HOME="$ANDROID_NDK_HOME"
+
+# armeabi-v7a
+./mvnw -pl transport-native-unix-common,transport-native-epoll -am package \
+  -DskipTests \
+  -Dandroid \
+  -DANDROID_NDK_HOME="$ANDROID_NDK_HOME"
+```
+
+Pass `-DANDROID_NDK_HOME` **and** export it. `${ANDROID_NDK_HOME}` is a Maven
+property; `export` alone is not enough unless the pom uses `${env.ANDROID_NDK_HOME}`.
+
+### 10.3 ELF gate
+
+```bash
+# arm64
+f="$PWD/transport-native-epoll/target/native-libs/arm64-v8a/libnetty_transport_native_epoll.so"
+file "$f"
+readelf -d "$f" | grep NEEDED
+# expect: ELF 64-bit LSB shared object, ARM aarch64
+# DT_NEEDED: libc.so, libm.so, libdl.so, liblog.so  (no librt, no libstdc++)
+
+# v7a
+f="$PWD/transport-native-epoll/target/native-libs/armeabi-v7a/libnetty_transport_native_epoll.so"
+file "$f"
+```
+
+Ship the `.so` under the APK/AAR `jni/<abi>/` directory. Do not rely on
+`NativeLibraryLoader` extracting `META-INF/native/` to tmpdir; Android tmp is
+often `noexec`.
+
+### 10.4 Standalone fallback (no Maven)
+
+```bash
+NDK=/data/soft/ndk/android-ndk-r25c
+TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+CC="$TC/bin/aarch64-linux-android21-clang"
+AR="$TC/bin/llvm-ar"
+
+# unix-common .a  (unpack netty-jni-util sources into target/netty-jni-util first)
+make -C transport-native-unix-common \
+  CC="$CC" AR="$AR" \
+  JNI_PLATFORM=linux \
+  LIB_DIR=$PWD/out/unix-common/arm64-v8a \
+  OBJ_DIR=$PWD/out/unix-common/arm64-v8a/obj \
+  LIB_NAME=libnetty-unix-common \
+  CFLAGS="-O3 -Werror -Wno-attributes -fPIC -fno-omit-frame-pointer -Wunused-variable -fvisibility=hidden"
+
+# epoll .so (after hawtjni generate, or compile src/main/c/*.c by hand)
+"$CC" -shared -fPIC -o out/jni/arm64-v8a/libnetty_transport_native_epoll.so \
+  transport-native-epoll/src/main/c/*.c \
+  -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+  -I transport-native-unix-common/src/main/c \
+  -I target-jni-util \
+  -Wl,--whole-archive out/unix-common/arm64-v8a/libnetty-unix-common.a -Wl,--no-whole-archive \
+  -ldl -lm \
+  -Wl,-soname=libnetty_transport_native_epoll.so
+```
+
+Repeat with `armv7a-linux-androideabi21-clang` for `armeabi-v7a`.
+
+---
+
+## 11. `netty-tcnative` (separate repository)
+
+Work in `/data/repo/netty-tcnative` (clone of https://github.com/netty/netty-tcnative),
+not this Netty tree. There are **zero** Android files upstream. `linux-aarch64` is GNU
+(`aarch64-none-linux-gnu-gcc` + APR `--host=aarch64-linux-gnu` + glibc). Same rule as
+epoll: that artifact will not load on Android.
+
+Android profiles live on `boringssl-static` (`-Dandroid`, same ABI layout as QUIC).
+Parent `build-apr-linux-mac` grows a `crossCompile=android` branch.
+
+Use **boringssl-static** (statically links BoringSSL; no `libssl.so` on device).
+`openssl-dynamic` needs a system OpenSSL, which Android does not ship.
+
+### 11.1 Maven (one ABI at a time)
+
+```bash
+cd /data/repo/netty-tcnative
+export ANDROID_NDK_HOME=/data/soft/ndk/android-ndk-r25c
+export JAVA_HOME=/root/.sdkman/candidates/java/current
+
+# arm64-v8a
+mvn -pl boringssl-static -am package -DskipTests \
+  -Dandroid -Pandroid-arm64-v8a \
+  -DANDROID_NDK_HOME="$ANDROID_NDK_HOME"
+
+# armeabi-v7a
+mvn -pl boringssl-static -am package -DskipTests \
+  -Dandroid \
+  -DANDROID_NDK_HOME="$ANDROID_NDK_HOME"
+```
+
+Green:
+
+```bash
+f=boringssl-static/target/native-libs/arm64-v8a/libnetty_tcnative.so
+file "$f"
+readelf -d "$f" | grep NEEDED
+# ELF 64-bit ARM aarch64; DT_NEEDED: libc, libm, libdl, libc++_shared (no librt, no libssl)
+```
+
+Ship `libnetty_tcnative.so` and `libc++_shared.so` under `jni/<abi>/`.
+
+### 11.2 What the profiles do
+
+1. BoringSSL with the NDK cmake toolchain (same flags as QUIC section 7:
+   `-DANDROID_ABI=... -DANDROID_PLATFORM=android-21 -DANDROID_STL=c++_shared`).
+2. Apache APR as a static lib with NDK clang (`crossCompile=android` in the
+   parent APR antrun: `--host=aarch64-linux-android` /
+   `arm-linux-androideabi`, `ac_cv_sizeof_struct_iovec=16` for arm64 / `8`
+   for v7a, host-built `tools/gen_test_char`).
+3. tcnative JNI (`hawtjni`) `--with-ssl=no --with-apr=... --with-static-libs`,
+   NDK clang, `LDFLAGS=-lssl -lcrypto -lc++_shared`.
+4. Copy `jni/<abi>/libnetty_tcnative.so` plus `libc++_shared.so`.
+
+Leave tcnative's `boringsslCommitSha` alone unless you intend to re-validate.
+
+### 11.3 Standalone sketch (arm64-v8a)
+
+Work in `/data/repo/netty-tcnative` if Maven is failing and you need to isolate
+APR or cmake.
+
+```bash
+git clone --depth 1 https://github.com/netty/netty-tcnative.git
+# BoringSSL: copy the cmake invocation from section 7.
+
+# APR 1.7.x
+TC="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
+CC="$TC/bin/aarch64-linux-android21-clang"
+curl -fsSLO https://archive.apache.org/dist/apr/apr-1.7.6.tar.gz
+tar xf apr-1.7.6.tar.gz && cd apr-1.7.6
+./configure --prefix="$PWD/../apr-android-arm64" --host=aarch64-linux-android \
+  --disable-shared --enable-static \
+  CC="$CC" CFLAGS="-O3 -fPIC -fno-omit-frame-pointer" \
+  ac_cv_have_decl_sys_siglist=no ac_cv_file__dev_zero=yes \
+  ac_cv_func_setpgrp_void=yes apr_cv_tcp_nodelay_with_cork=yes \
+  ac_cv_sizeof_struct_iovec=8 ac_cv_search_crypt=no
+# If tools/gen_test_char is an Android binary, rebuild it with host gcc:
+( cd tools && gcc -Wall -O2 -DCROSS_COMPILE gen_test_char.c -o gen_test_char )
+make && make install
+```
+
+Then point boringssl-static's hawtjni `--with-apr` and BoringSSL `LDFLAGS` at
+those prefixes, with `--host=aarch64-linux-android` and the NDK clang
+`configureArg`s from `codec-native-quic` (section 0.3). Link `-lc++_shared`,
+not `-lstdc++`.
+
+Green: `libnetty_tcnative.so` is ELF for the ABI, `DT_NEEDED` is bionic +
+`libc++_shared`, no `librt`, no `libssl.so`.
+
+`OpenSsl.loadTcNative()` on Android reports `os.name=Linux`, so without the
+handler patch it tries `netty_tcnative_linux_aarch_64` first. Section 12 makes
+it load `netty_tcnative` immediately.
+
+---
+
+## 12. Android `System.loadLibrary` names
+
+`NativeLibraryLoader.load` first calls `System.loadLibrary(name)`. On Android
+that looks up `jni/<abi>/lib<name>.so`. Suffixes like `_linux_aarch_64` will
+not match an AAR `jniLibs` layout.
+
+| component | Android soname | Java |
+|---|---|---|
+| QUIC | `libnetty_quiche42.so` | `Quiche.loadNativeLibrary()` already drops the suffix on Android |
+| epoll | `libnetty_transport_native_epoll.so` | `Native.loadNativeLibrary()` must drop the suffix on Android |
+| tcnative | `libnetty_tcnative.so` | `OpenSsl.loadTcNative()` must try `netty_tcnative` first on Android |
+
+Fallback without the Java patch: epoll already tries unsuffixed
+`netty_transport_native_epoll` after the arch-suffixed name fails; tcnative's
+`loadFirstAvailable` eventually tries `netty_tcnative`. Prefer the explicit
+Android branch so you do not pay several failed `dlopen`s and so a stray
+glibc `.so` in the APK cannot win.
